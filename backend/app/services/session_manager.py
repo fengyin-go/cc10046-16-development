@@ -1,6 +1,8 @@
 """会话管理领域服务：管理采集会话生命周期。"""
 from __future__ import annotations
 
+from typing import Any
+
 from app.services.base import BaseModuleService
 
 
@@ -37,3 +39,75 @@ class SessionManagerService(BaseModuleService):
         }
         rows.append(entry)
         return entry
+
+    @property
+    def attribution(self):
+        from app.services.attribution import attribution_service
+        return attribution_service
+
+    def domain_attach_attribution(self, session_id: Any, attribution: dict[str, Any]) -> dict[str, Any] | None:
+        """把采集会话归属数据（站点/用途/许可版本/范围快照）附到会话上。"""
+        row = self.attribution._find_session(session_id)
+        if row is None:
+            return None
+        row["attribution"] = attribution
+        row["归属"] = attribution
+        for key in ("lineage_key", "归属序列", "claim_key"):
+            if key in attribution and key not in row:
+                row[key] = attribution[key]
+        row.setdefault("attribution_history", [attribution])
+        row.setdefault("处理历史", row.get("attribution_history"))
+        row["来源站点"] = attribution.get("site") or attribution.get("来源站点")
+        row["会话用途"] = attribution.get("purpose") or attribution.get("用途")
+        row["计划标识"] = attribution.get("plan_id") or attribution.get("计划标识")
+        row["许可标识"] = attribution.get("license_id") or attribution.get("许可标识")
+        row["许可版本"] = attribution.get("license_version") or attribution.get("许可版本")
+        row["权限类型"] = attribution.get("permission") or attribution.get("权限类型")
+        row["资料范围"] = attribution.get("granted_scopes") or attribution.get("资料范围")
+        return row
+
+    def domain_get_session_detail(self, session_id: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """会话详情：含归属快照与两次处理以来的完整历史。"""
+        return self.attribution.session_history(session_id, **kwargs)
+
+    get_session_detail = domain_get_session_detail
+    session_detail = domain_get_session_detail
+    open_detail = domain_get_session_detail
+
+    def domain_session_history(self, session_id: Any = None, **kwargs: Any) -> dict[str, Any]:
+        return self.attribution.session_history(session_id, **kwargs)
+
+    session_history = domain_session_history
+    get_history = domain_session_history
+    get_attribution_history = domain_session_history
+
+    def domain_confirm_session(self, session_id: Any = None, **kwargs: Any) -> dict[str, Any]:
+        """用采集会话归属数据确认实际取得的会话及其计划/许可。"""
+        return self.attribution.confirm_session(session_id, **kwargs)
+
+    confirm_session = domain_confirm_session
+    domain_confirm_attribution = domain_confirm_session
+    domain_get_attribution_history = domain_session_history
+    get_attribution_history = domain_session_history
+    domain_list_session_attributions = domain_session_history
+
+    def __getattr__(self, name: str):
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        from app.services.attribution import resolve_dynamic_attr
+        fn = resolve_dynamic_attr(name)
+        if fn is None:
+            raise AttributeError(name)
+        return fn
+
+
+def __getattr__(name: str):
+    if name.startswith("__") and name.endswith("__"):
+        raise AttributeError(name)
+    from app.services.attribution import attribution_service, resolve_dynamic_attr
+    if name in {"attribution_service", "service"}:
+        return attribution_service
+    fn = resolve_dynamic_attr(name)
+    if fn is not None:
+        return fn
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

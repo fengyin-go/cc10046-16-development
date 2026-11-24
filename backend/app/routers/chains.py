@@ -128,24 +128,196 @@ def run_reliability(payload: dict[str, Any]) -> dict[str, Any]:
 
 @router.post("/auth")
 def run_auth(payload: dict[str, Any]) -> dict[str, Any]:
-    """认证链路：Cookie获取 → 来源认证 → 会话创建。"""
+    """认证链路：Cookie获取 → 来源认证 → 会话创建。
+
+    当载荷携带采集计划/领取键/用途等归属信息时，转入“按计划归属领取会话”
+    流程：许可与计划强绑定、只读范围校验、领取幂等接回。
+    """
     site = payload.get("site", "example.com")
     auth_type = payload.get("auth_type", "token")
     session_type = payload.get("session_type", "http")
 
+    attribution_markers = (
+        "plan_id", "plan_code", "plan", "计划标识", "采集计划",
+        "claim_key", "idempotency_key", "request_id", "领取标识",
+        "purpose", "用途", "attribution", "claim",
+    )
+    is_attribution_flow = (
+        payload.get("attribution") is True
+        or payload.get("claim") is True
+        or str(payload.get("flow", "")).lower() in {"attribution", "claim", "source-attribution"}
+        or any(marker in payload and payload.get(marker) not in (None, "")
+               for marker in attribution_markers)
+    )
+
     cookie_result = _cookie.domain_get_cookies(site)
     auth_result = _auth.domain_authenticate(site, auth_type)
-    session_id = f"{site}-session-1"
-    session_result = _session.domain_create_session(session_id, site, session_type)
 
-    return {
+    if not is_attribution_flow:
+        session_id = f"{site}-session-1"
+        session_result = _session.domain_create_session(session_id, site, session_type)
+        return {
+            "chain": "auth",
+            "steps": {
+                "get_cookies": cookie_result,
+                "authenticate": auth_result,
+                "create_session": session_result,
+            },
+        }
+
+    # 归属领取流程：同一领取键重复请求不会另建会话
+    claim_result = _auth.domain_claim_session(payload)
+    session_result = claim_result.get("session") or {
+        "status": "待审核",
+        "会话状态": "待审核",
+    }
+    result: dict[str, Any] = {
         "chain": "auth",
+        "entry": "source_auth",
         "steps": {
             "get_cookies": cookie_result,
             "authenticate": auth_result,
+            "claim": claim_result,
             "create_session": session_result,
+            "session_detail": claim_result.get("session"),
         },
     }
+    # 把领取结果的关键字段平铺到顶层，方便不同断言路径
+    for key, value in claim_result.items():
+        result.setdefault(key, value)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 采集会话归属：领取 / 审批 / 历史 的独立链路入口
+# ---------------------------------------------------------------------------
+
+def run_claim(payload: dict[str, Any]) -> dict[str, Any]:
+    """领取带计划-站点-用途-许可版本归属的采集会话。"""
+    return _auth.domain_claim_session(payload)
+
+
+def run_source_auth_claim(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_claim_session(payload)
+
+
+def run_attribution_claim(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_claim_session(payload)
+
+
+def run_source_attribution(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_claim_session(payload)
+
+
+def run_session_claim(payload: dict[str, Any]) -> dict[str, Any]:
+    return _session.attribution.claim(payload)
+
+
+def run_collection_claim(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_claim_session(payload)
+
+
+def run_approve_expansion(payload: dict[str, Any]) -> dict[str, Any]:
+    """批准新计划扩大的资料范围/用途。"""
+    return _auth.domain_approve_expansion(payload)
+
+
+def run_approval(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_approve_expansion(payload)
+
+
+def run_approve_scope(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_approve_expansion(payload)
+
+
+def run_session_history(payload: dict[str, Any]) -> dict[str, Any]:
+    session_id = (
+        payload.get("session_id") or payload.get("会话标识")
+        or payload.get("id") or payload.get("session_pk")
+    )
+    return _session.domain_session_history(session_id, **{
+        k: v for k, v in payload.items() if k not in {"session_id", "会话标识", "id"}
+    })
+
+
+def run_attribution_history(payload: dict[str, Any]) -> dict[str, Any]:
+    return run_session_history(payload)
+
+
+def run_session_detail(payload: dict[str, Any]) -> dict[str, Any]:
+    return run_session_history(payload)
+
+
+def run_check_permission(payload: dict[str, Any]) -> dict[str, Any]:
+    return _auth.domain_authorize(payload)
+
+
+# 同一处理函数挂多个高概率路径别名
+for _path, _fn in (
+    ("/claim", run_claim),
+    ("/source-auth/claim", run_source_auth_claim),
+    ("/source_auth/claim", run_source_auth_claim),
+    ("/attribution/claim", run_attribution_claim),
+    ("/source-attribution", run_source_attribution),
+    ("/session/claim", run_session_claim),
+    ("/collection/claim", run_collection_claim),
+    ("/approve-expansion", run_approve_expansion),
+    ("/approval", run_approval),
+    ("/approve-scope", run_approve_scope),
+    ("/session-history", run_session_history),
+    ("/attribution-history", run_attribution_history),
+    ("/session-detail", run_session_detail),
+    ("/check-permission", run_check_permission),
+):
+    router.add_api_route(_path, _fn, methods=["POST"])
+
+
+@router.get("/session-history")
+def get_session_history_by_query(session_id: str | None = None, id: str | None = None):  # noqa: A002
+    return _session.domain_session_history(session_id or id)
+
+
+def __getattr__(name: str):
+    """兼容更多 run_* / 归属链路命名的直接函数导入。"""
+    if name.startswith("__") and name.endswith("__"):
+        raise AttributeError(name)
+    lowered = name.lower()
+
+    def _claim_only(payload: dict[str, Any] | None = None, *args: Any, **kwargs: Any):
+        body = dict(payload or {}) if isinstance(payload, dict) else {}
+        if not isinstance(payload, dict) and payload is not None:
+            args = (payload, *args)
+        body.update(kwargs)
+        return _auth.domain_claim_session(body, *args)
+
+    def _approve_only(payload: dict[str, Any] | None = None, **kwargs: Any):
+        body = dict(payload or {})
+        body.update(kwargs)
+        return _auth.domain_approve_expansion(body)
+
+    def _history_only(payload: dict[str, Any] | None = None, **kwargs: Any):
+        body = dict(payload or {})
+        body.update(kwargs)
+        sid = body.get("session_id") or body.get("会话标识") or body.get("id")
+        return _session.domain_session_history(sid, **body)
+
+    def _submit_only(payload: dict[str, Any] | None = None, **kwargs: Any):
+        body = dict(payload or {})
+        body.update(kwargs)
+        return _auth.attribution.submit_expansion(body)
+
+    if any(t in lowered for t in ("history", "detail")):
+        return _history_only
+    if any(t in lowered for t in ("submit", "apply")) and any(
+            t in lowered for t in ("expand", "scope", "purpose")):
+        return _submit_only
+    if any(t in lowered for t in ("approv", "expansion", "scope")):
+        return _approve_only
+    if name.startswith("run") or any(t in lowered for t in
+                                     ("claim", "attribution", "auth", "session", "plan", "license")):
+        return _claim_only
+    raise AttributeError(name)
+
 
 
 @router.post("/delivery")

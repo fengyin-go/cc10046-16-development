@@ -23,6 +23,18 @@ from app.services.incremental_sync import IncrementalSyncService
 from app.services.error_logger import ErrorLoggerService
 from app.services.session_manager import SessionManagerService
 from app.services.data_cleanup import DataCleanupService
+from app.services.collection_plan import CollectionPlanService
+from app.services.source_license import SourceLicenseService
+from app.services.claim_record import ClaimRecordService, SessionAttributionService
+
+# 同表别名服务：允许不同命名的模块 key 访问同一份领域数据
+class CrawlPlanService(CollectionPlanService):
+    MODULE = "collection_plan"
+
+
+class LicenseAliasService(SourceLicenseService):
+    MODULE = "source_license"
+
 
 SERVICES: dict[str, BaseModuleService] = {
     "crawler_config": CrawlerConfigService(),
@@ -46,6 +58,13 @@ SERVICES: dict[str, BaseModuleService] = {
     "error_logger": ErrorLoggerService(),
     "session_manager": SessionManagerService(),
     "data_cleanup": DataCleanupService(),
+    # 采集会话归属能力新增的领域数据
+    "collection_plan": CollectionPlanService(),
+    "crawl_plan": CrawlPlanService(),
+    "source_license": SourceLicenseService(),
+    "license": LicenseAliasService(),
+    "claim_record": ClaimRecordService(),
+    "session_attribution": SessionAttributionService(),
 }
 
 
